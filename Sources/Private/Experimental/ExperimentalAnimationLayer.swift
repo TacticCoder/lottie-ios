@@ -55,13 +55,16 @@ final class ExperimentalAnimationLayer: CALayer {
 
   var imageProvider: AnimationImageProvider
 
-  /// Sets up `CAAnimation`s for each `AnimationLayer` in the layer hierarchy
+  /// Sets up `CAAnimation`s for each `AnimationLayer` in the layer hierarchy,
+  /// playing from `currentFrame`.
   func setupAnimation(
     context: AnimationContext,
     timingConfiguration: CAMediaTimingConfiguration)
   {
     // Remove any existing animations from the layer hierarchy
     removeAnimations()
+
+    playbackState = .realtime
 
     currentAnimationConfiguration = AnimationConfiguration(
       animationContext: context,
@@ -117,8 +120,27 @@ final class ExperimentalAnimationLayer: CALayer {
     let timingConfiguration: CAMediaTimingConfiguration
   }
 
-  // Configuration for the animation that is currently playing in this layer
+  private enum PlaybackState: Equatable {
+    /// The animation is playing in real-time
+    case realtime
+    /// The animation is statically displaying a specific frame
+    case specificFrame(AnimationFrameTime)
+  }
+
+  // Configuration for the animation that is currently setup in this layer
   private var currentAnimationConfiguration: AnimationConfiguration?
+
+  // The current state of the animation that is playing in this layer
+  private var playbackState: PlaybackState? {
+    didSet {
+      switch playbackState {
+      case .realtime, nil:
+        timeOffset = 0
+      case .specificFrame(let frame):
+        timeOffset = animation.time(forFrame: frame)
+      }
+    }
+  }
 
   /// The current progress of the placeholder `CAAnimation`,
   /// which is also the realtime animation progress of this layer's animation
@@ -152,6 +174,27 @@ final class ExperimentalAnimationLayer: CALayer {
     add(timedProgressAnimation, forKey: #keyPath(animationProgress))
   }
 
+  // Removes the current `CAAnimation`s, and rebuilds new animations
+  // using the same configuration as the previous animations.
+  private func rebuildCurrentAnimation() {
+    guard
+      let currentConfiguration = currentAnimationConfiguration,
+      let playbackState = playbackState
+    else { return }
+
+    removeAnimations()
+
+    switch playbackState {
+    case .specificFrame(let frame):
+      currentFrame = frame
+
+    case .realtime:
+      setupAnimation(
+        context: currentConfiguration.animationContext,
+        timingConfiguration: currentConfiguration.timingConfiguration)
+    }
+  }
+
 }
 
 // MARK: RootAnimationLayer
@@ -164,7 +207,12 @@ extension ExperimentalAnimationLayer: RootAnimationLayer {
 
   var currentFrame: AnimationFrameTime {
     get {
-      animation.frameTime(forProgress: (presentation() ?? self).animationProgress)
+      switch playbackState {
+      case .realtime, nil:
+        return animation.frameTime(forProgress: (presentation() ?? self).animationProgress)
+      case .specificFrame(let frame):
+        return frame
+      }
     }
     set {
       // We can display a specific frame of the animation by setting
@@ -185,7 +233,7 @@ extension ExperimentalAnimationLayer: RootAnimationLayer {
           timingConfiguration: requiredAnimationConfiguration.timingConfiguration)
       }
 
-      timeOffset = animation.time(forFrame: newValue)
+      playbackState = .specificFrame(newValue)
     }
   }
 
@@ -226,9 +274,11 @@ extension ExperimentalAnimationLayer: RootAnimationLayer {
   }
 
   func setValueProvider(_ valueProvider: AnyValueProvider, keypath: AnimationKeypath) {
-    // TODO: We need to rebuild the current animation after registering a value provider,
-    // since any existing `CAAnimation`s could now be out of date.
     valueProviderStore.setValueProvider(valueProvider, keypath: keypath)
+
+    // We need to rebuild the current animation after registering a value provider,
+    // since any existing `CAAnimation`s could now be out of date.
+    rebuildCurrentAnimation()
   }
 
   func getValue(for _: AnimationKeypath, atFrame _: AnimationFrameTime?) -> Any? {
@@ -250,6 +300,7 @@ extension ExperimentalAnimationLayer: RootAnimationLayer {
 
   func removeAnimations() {
     currentAnimationConfiguration = nil
+    playbackState = nil
     removeAllAnimations()
 
     for sublayer in allSublayers {
